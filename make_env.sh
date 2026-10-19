@@ -14,8 +14,8 @@ if [ ! -f .env ]; then
     
     cp .env.example .env
     
-    sed -i "s|^MONGO_INITDB_ROOT_USERNAME=.*|MONGO_INITDB_ROOT_USERNAME=${MONGO_USER}" .env
-    sed -i "s|^MONGO_INITDB_ROOT_PASSWORD=.*|MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASS}" .env
+    sed -i "s|^MONGO_INITDB_ROOT_USERNAME=.*|MONGO_INITDB_ROOT_USERNAME=${MONGO_USER}|" .env
+    sed -i "s|^MONGO_INITDB_ROOT_PASSWORD=.*|MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASS}|" .env
     sed -i "s|^MONGODB_URI=.*|MONGODB_URI=mongodb://${MONGO_USER}:${MONGO_PASS}@mongodb:27017/${DB_NAME}?authSource=admin|" .env
 
     chmod 600 .env    
