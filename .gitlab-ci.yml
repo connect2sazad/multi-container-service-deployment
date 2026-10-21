@@ -1,0 +1,193 @@
+default:
+  tags:
+    - aws-runner
+    - docker
+    - self-hosted
+
+image:
+  name: hashicorp/terraform:latest
+  entrypoint:
+    - ""
+
+# declare all stages/jobs in the pipeline
+stages:
+  - secret-detection
+
+  # terraform stages
+  - tf_init
+  - tf_fmt
+  - tf_validate
+  - tf_plan
+  - tf_apply
+
+  # ansible stages
+  - test_inventory
+  - test_ansible
+  - setup_server
+
+  # terraform cleanup
+  - tf_destroy
+
+variables:
+  SECRET_DETECTION_ENABLED: 'true'
+  TF_ROOT: terraform
+  ANSIBLE_ROOT: ansible
+  APP_ROOT: app
+  SKIP_JOB: 'true' # set to true to skip job
+
+.skip_job:
+  rules:
+    - if: '$SKIP_JOB == "true"'
+      when: never
+    - when: on_success
+
+# detect if any secrets is pushed
+secret_detection:
+  stage: secret-detection
+
+# include secret detection template provided by gitlab
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "master'
+    - when: never
+
+cache:
+  key: $CI_COMMIT_REF_SLUG
+  paths:
+    - terraform/.terraform/
+    - terraform/.terraform.lock.hcl
+
+tf_init:
+  stage: tf_init
+  extends: .skip_job
+  script:
+    - terraform -chdir=$TF_ROOT init
+
+tf_fmt:
+  stage: tf_fmt
+  extends: .skip_job
+  script:
+    - terraform -chdir=$TF_ROOT init
+    - terraform -chdir=$TF_ROOT fmt
+
+tf_validate:
+  stage: tf_validate
+  extends: .skip_job
+  script:
+    - terraform -chdir=$TF_ROOT init
+    - terraform -chdir=$TF_ROOT validate
+
+tf_plan:
+  stage: tf_plan
+  extends: .skip_job
+  script:
+    - terraform -chdir=$TF_ROOT init
+    - terraform -chdir=$TF_ROOT plan -out=tfplan
+  artifacts:
+    paths:
+      - terraform/tfplan
+    expire_in: 1 hour
+
+tf_apply:
+  stage: tf_apply
+  extends: .skip_job
+  dependencies:
+    - tf_plan
+  allow_failure: false
+  script:
+    - terraform -chdir=$TF_ROOT init
+    - terraform -chdir=$TF_ROOT apply --auto-approve tfplan
+
+
+.ansible_setup:
+  image: python:3.12-slim
+
+  before_script:
+    - apt-update
+    - apt-get install -y --no-install-recommends awscli openssh-client git
+    - pip install --no-cache-dir ansible boto3 botocore
+    - ansible-galaxy collection install -r "$ANSIBLE_ROOT/requirements.yml"
+
+    - export ANSIBLE_CONFIG="$ANSIBLE_ROOT/ansible.cfg"
+
+    - mkdir -p /root/.ssh
+    - chmod 700 /root/.ssh
+
+    - cp "$SSH_PRIVATE_KEY" /root/.ssh/server_private_key
+    - chmod 600 /root/.ssh/server_private_key
+
+    # prevent host key prompts
+    - |
+      cat > /root/.ssh/config <<EOF
+      Host *
+          StrictHostKeyChecking no
+          UserKnownHostsFile /dev/null
+          ConnectTimeout 20
+      EOF
+    - chmod 600 /root/.ssh/config
+
+test_inventory:
+  stage: test_inventory
+  image: python:3.12-slim
+  extends: .skip_job
+  dependencies:
+    - tf_apply
+  needs:
+    - job: tf_apply
+      artifacts: false
+      optional: true
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends awscli openssh-client git
+    - pip install --no-cache-dir ansible boto3 botocore
+    - ansible-galaxy collection install -r "$ANSIBLE_ROOT/requirements.yml"
+    - export ANSIBLE_CONFIG="$ANSIBLE_ROOT/ansible.cfg"
+  script:
+    - aws sts get-caller-identity
+    - ansible-inventory -i "$ANSIBLE_ROOT/inventory/aws_ec2.yml" --graph
+    - ansible-inventory -i "$ANSIBLE_ROOT/inventory/aws_ec2.yml" --list
+
+test_ansible_connection:
+  stage: test_ansible_connection
+  extends:
+    - .ansible_setup
+    - .skip_job
+  needs:
+    - job: test_inventory
+      artifacts: false
+  script:
+    - aws sts get-caller-identity
+    - cd "$ANSIBLE_ROOT"
+    - echo ""
+    - echo "================================"
+    - echo "Pinging Server"
+    - echo "================================"
+    - ansible-playbook playbooks/test_ansible.yml
+
+
+setup_server:
+  stage: setup_server
+  extends:
+    - .ansible_setup
+    - .skip_job
+  needs:
+    - job: test_ansible_connection
+      artifacts: false
+  script:
+    - aws sts get-caller-identity
+    - cd "$ANSIBLE_ROOT"
+    - ansible-playbook playbooks/setup_server.yml
+  
+
+
+tf_destroy:
+  stage: tf_destroy
+  dependencies:
+    - tf_apply
+  allow_failure: false
+  script:
+    - terraform -chdir=$TF_ROOT init
+    - terraform -chdir=$TF_ROOT destroy --auto-approve
